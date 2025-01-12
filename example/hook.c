@@ -9,4 +9,5 @@ int replacement_foo() {
 
 static void __attribute__((constructor)) ctor() {
 	DSHookFunction(foo, replacement_foo, &original_foo);
+	DSUnhookFunction(foo);
 }

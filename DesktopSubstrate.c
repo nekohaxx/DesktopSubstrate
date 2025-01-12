@@ -17,6 +17,16 @@
 
 #define ENDBR64 0xfa1e0ff3U
 
+struct DSHook {
+	void *func;
+	size_t patchsize;
+	void *newfunc;
+	size_t newfuncsize;
+	struct DSHook *next;
+};
+
+struct DSHook *DSHooks = NULL;
+
 int DSGetPatchSize(void *address) {
 	csh handle;
 	cs_insn *insn;
@@ -85,6 +95,12 @@ void DSHookFunction(void *func, void *replace, void **orig) {
 	void *region_start;
 	size_t region_size;
 
+	struct DSHook *hook = DSHooks;
+	while (hook != NULL) {
+		if (hook->func == func) return;
+		hook = hook->next;
+	}
+
 	if (DSGetMemoryRegion(func, &region_start, &region_size) == -1) {
 		if (orig != NULL) {
 			*orig = NULL;
@@ -95,15 +111,21 @@ void DSHookFunction(void *func, void *replace, void **orig) {
 	int patchSize = DSGetPatchSize(func);
 	bool endbr64 = *((uint32_t*)func) == ENDBR64;
 
+	void *newfunc = NULL;
+	size_t size;
+
 	if (orig != NULL) {
-		size_t size = patchSize + 5;
-		void *newfunc = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		size = patchSize + 5;
+		newfunc = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 		memcpy(newfunc, func, patchSize);
 		void *jmpAddr = newfunc + patchSize;
 		*((uint8_t*)jmpAddr) = 0xE9;
 		*((int32_t*)(jmpAddr + 1)) = func + patchSize - jmpAddr - 5; // TODO: ???
 		mprotect(newfunc, size, PROT_READ | PROT_EXEC);
 		*orig = newfunc;
+	} else {
+		newfunc = malloc(patchSize);
+		memcpy(newfunc, func, patchSize);
 	}
 
 	mprotect(region_start, region_size, PROT_READ | PROT_WRITE);
@@ -113,4 +135,40 @@ void DSHookFunction(void *func, void *replace, void **orig) {
 	*((int32_t*)(patchAddr + 1)) = replace - patchAddr - 5; // TODO: ???
 
 	mprotect(region_start, region_size, PROT_READ | PROT_EXEC);
+
+	struct DSHook *newhook = malloc(sizeof(struct DSHook));
+	newhook->func = func;
+	newhook->patchsize = patchSize;
+	newhook->newfunc = newfunc;
+	newhook->newfuncsize = size;
+	newhook->next = DSHooks;
+	DSHooks = newhook;
+}
+
+void DSUnhookFunction(void *func) {
+	void *region_start;
+	size_t region_size;
+
+	struct DSHook *hook = DSHooks;
+	struct DSHook **previousHook = &DSHooks;
+	while (hook != NULL) {
+		if (hook->func == func) {
+			if (DSGetMemoryRegion(func, &region_start, &region_size) == -1) {
+				return;
+			}
+			mprotect(region_start, region_size, PROT_READ | PROT_WRITE);
+			memcpy(func, hook->newfunc, hook->patchsize);
+			mprotect(region_start, region_size, PROT_READ | PROT_EXEC);
+			if (hook->patchsize == 0) {
+				free(hook->newfunc);
+			} else {
+				munmap(hook->newfunc, hook->newfuncsize);
+			}
+			*previousHook = hook->next;
+			free(hook);
+			return;
+		}
+		hook = hook->next;
+		previousHook = &hook->next;
+	}
 }
